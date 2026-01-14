@@ -8,6 +8,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
 type ConfigItem = {
@@ -28,7 +29,9 @@ function App() {
   const [status, setStatus] = useState("");
   const [iconCache, setIconCache] = useState<Record<string, string>>({});
   const launcherRef = useRef<HTMLElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const resizeRef = useRef<() => void>(() => undefined);
+  const windowHandle = useMemo(() => getCurrentWindow(), []);
 
   const filtered = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -81,6 +84,34 @@ function App() {
   }, [missingIcons]);
 
   useEffect(() => {
+    let unlistenConfig: (() => void) | undefined;
+    let unlistenFocus: (() => void) | undefined;
+
+    const focusInput = () => {
+      const input = inputRef.current;
+      if (!input) return;
+      input.focus();
+      input.select();
+    };
+
+    listen<AppConfig>("config_refreshed", (event) => {
+      setItems(event.payload.items ?? []);
+    })
+      .then((stop) => {
+        unlistenConfig = stop;
+      })
+      .catch((err) => setStatus(String(err)));
+
+    listen("focus_input", () => {
+      focusInput();
+    })
+      .then((stop) => {
+        unlistenFocus = stop;
+      })
+      .catch((err) => setStatus(String(err)));
+
+    invoke("refresh_config").catch((err) => setStatus(String(err)));
+
     invoke<AppConfig>("get_config")
       .then((config) => {
         setItems(config.items ?? []);
@@ -90,13 +121,21 @@ function App() {
     invoke<string>("get_config_dir")
       .then((dir) => setConfigDir(dir))
       .catch((err) => setStatus(String(err)));
+
+    return () => {
+      if (unlistenConfig) {
+        unlistenConfig();
+      }
+      if (unlistenFocus) {
+        unlistenFocus();
+      }
+    };
   }, []);
 
   useLayoutEffect(() => {
     const launcher = launcherRef.current;
     if (!launcher) return;
 
-    const windowHandle = getCurrentWindow();
     const resize = () => {
       const rect = launcher.getBoundingClientRect();
       const width = Math.max(rect.width, launcher.scrollWidth);
@@ -138,7 +177,7 @@ function App() {
     setStatus("");
     try {
       await invoke("run_command", { command: item.command });
-      await invoke("quit");
+      await windowHandle.hide();
     } catch (err) {
       setStatus(String(err));
     }
@@ -165,6 +204,10 @@ function App() {
     }
     if (event.key === "Escape") {
       event.preventDefault();
+      windowHandle.hide().catch(() => undefined);
+    }
+    if (event.key.toLowerCase() === "q" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
       invoke("quit").catch(() => undefined);
     }
   };
@@ -183,6 +226,7 @@ function App() {
             onKeyDown={handleKeyDown}
             placeholder="Search commands..."
             autoFocus
+            ref={inputRef}
           />
         </div>
 

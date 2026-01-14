@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tauri::{Emitter, Manager, WindowEvent};
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -9,12 +10,12 @@ use std::{
 use std::os::unix::fs::PermissionsExt;
 use base64::{engine::general_purpose, Engine as _};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct AppConfig {
     items: Vec<ConfigItem>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct ConfigItem {
     label: String,
     command: String,
@@ -54,6 +55,22 @@ fn ensure_config_file(config_dir: &Path) -> Result<PathBuf, String> {
         fs::write(&config_path, data).map_err(|err| format!("write config: {err}"))?;
     }
     Ok(config_path)
+}
+
+fn config_cache_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("items-cache.json")
+}
+
+fn read_config_cache(config_dir: &Path) -> Option<AppConfig> {
+    let cache_path = config_cache_path(config_dir);
+    let raw = fs::read_to_string(cache_path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn write_config_cache(config_dir: &Path, config: &AppConfig) -> Result<(), String> {
+    let cache_path = config_cache_path(config_dir);
+    let data = serde_json::to_string(config).map_err(|err| format!("serialize cache: {err}"))?;
+    fs::write(cache_path, data).map_err(|err| format!("write cache: {err}"))
 }
 
 fn desktop_icon_map() -> HashMap<String, String> {
@@ -274,8 +291,7 @@ fn path_items(icon_map: &HashMap<String, String>) -> Vec<ConfigItem> {
     items
 }
 
-#[tauri::command]
-fn get_config() -> Result<AppConfig, String> {
+fn build_config() -> Result<AppConfig, String> {
     let dir = ensure_config_dir()?;
     let config_path = ensure_config_file(&dir)?;
     let raw = fs::read_to_string(config_path).map_err(|err| format!("read config: {err}"))?;
@@ -306,6 +322,41 @@ fn get_config() -> Result<AppConfig, String> {
 }
 
 #[tauri::command]
+fn get_config() -> Result<AppConfig, String> {
+    let dir = ensure_config_dir()?;
+    let _ = ensure_config_file(&dir)?;
+    if let Some(config) = read_config_cache(&dir) {
+        return Ok(config);
+    }
+    Ok(default_config())
+}
+
+#[tauri::command]
+fn refresh_config(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn(async move {
+        let config = match build_config() {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("refresh_config failed: {err}");
+                return;
+            }
+        };
+        let dir = match ensure_config_dir() {
+            Ok(dir) => dir,
+            Err(err) => {
+                eprintln!("refresh_config config dir failed: {err}");
+                return;
+            }
+        };
+        if let Err(err) = write_config_cache(&dir, &config) {
+            eprintln!("refresh_config cache write failed: {err}");
+        }
+        let _ = app.emit("config_refreshed", config);
+    });
+    Ok(())
+}
+
+#[tauri::command]
 fn get_icon_data(path: String) -> Result<String, String> {
     let path = PathBuf::from(path);
     let bytes = fs::read(&path).map_err(|err| format!("read icon: {err}"))?;
@@ -322,14 +373,15 @@ fn get_config_dir() -> Result<String, String> {
 
 #[tauri::command]
 fn run_command(command: String) -> Result<(), String> {
-    let mut parts = command.split_whitespace();
-    let program = parts
-        .next()
-        .ok_or_else(|| "command is empty".to_string())?;
-    let args: Vec<String> = parts.map(|part| part.to_string()).collect();
+    let command = command.trim();
+    if command.is_empty() {
+        return Err("command is empty".to_string());
+    }
 
-    Command::new(program)
-        .args(args)
+    // Use a shell so scripts without a shebang and shell features (quotes, env vars, newlines) work.
+    Command::new("sh")
+        .arg("-lc")
+        .arg(command)
         .spawn()
         .map_err(|err| format!("spawn command: {err}"))?;
     Ok(())
@@ -343,10 +395,69 @@ fn quit(app: tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = ensure_config_dir().and_then(|dir| ensure_config_file(&dir));
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            let Some(window) = app.get_webview_window("main") else {
+                return;
+            };
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+            let _ = window.emit("focus_input", ());
+        }));
+    }
+
+    builder
+        .setup(|app| {
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_global_shortcut::{
+                    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
+                };
+
+                let shortcut = if cfg!(target_os = "macos") {
+                    Shortcut::new(Some(Modifiers::META), Code::Space)
+                } else {
+                    Shortcut::new(Some(Modifiers::CONTROL), Code::Space)
+                };
+
+                app.handle().plugin(
+                    tauri_plugin_global_shortcut::Builder::new()
+                        .with_handler(move |app, _, event| {
+                            if event.state() != ShortcutState::Pressed {
+                                return;
+                            }
+                            let Some(window) = app.get_webview_window("main") else {
+                                return;
+                            };
+                            let is_visible = window.is_visible().unwrap_or(false);
+                            if is_visible {
+                                let _ = window.hide();
+                                return;
+                            }
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                            let _ = window.emit("focus_input", ());
+                        })
+                        .build(),
+                )?;
+
+                let _ = app.global_shortcut().register(shortcut);
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_config,
+            refresh_config,
             get_icon_data,
             get_config_dir,
             run_command,
