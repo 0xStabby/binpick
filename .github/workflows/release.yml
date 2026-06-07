@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to publish, for example v0.1.0"
+        description: "Release tag to create or update, for example v0.1.0"
         required: true
         type: string
 
@@ -15,15 +15,52 @@ permissions:
   contents: write
 
 jobs:
-  publish-tauri:
-    name: Build Linux
+  linux-x86_64:
+    name: Linux x86_64
     runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Linux dependencies
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve release metadata
+        id: release_meta
+        shell: bash
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            RELEASE_TAG="$DISPATCH_TAG"
+          else
+            RELEASE_TAG="$GITHUB_REF_NAME"
+          fi
+
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9] ]]; then
+            echo "Release tag must look like v0.1.0; got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "release_version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Linux build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -33,36 +70,74 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-          run_install: false
-
-      - name: Install Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Publish release
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build release binaries
+        run: pnpm tauri:build
+
+      - name: Package prebuilt release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARCHIVE_ROOT="binpick-${RELEASE_VERSION}-linux-x86_64"
+
+          rm -rf "$ARCHIVE_ROOT"
+          mkdir -p \
+            "$ARCHIVE_ROOT/bin" \
+            "$ARCHIVE_ROOT/scripts" \
+            "$ARCHIVE_ROOT/src-tauri/icons"
+
+          install -Dm755 src-tauri/target/release/binpick "$ARCHIVE_ROOT/bin/binpick"
+          install -Dm755 src-tauri/target/release/binpick-theme-selector "$ARCHIVE_ROOT/bin/binpick-theme-selector"
+          install -Dm755 scripts/release-install.sh "$ARCHIVE_ROOT/scripts/release-install.sh"
+          install -Dm644 src-tauri/icons/icon.png "$ARCHIVE_ROOT/src-tauri/icons/icon.png"
+          install -Dm644 README.md "$ARCHIVE_ROOT/README.md"
+
+          tar -czf "${ARCHIVE_ROOT}.tar.gz" "$ARCHIVE_ROOT"
+          sha256sum "${ARCHIVE_ROOT}.tar.gz" > "${ARCHIVE_ROOT}.tar.gz.sha256"
+
+      - name: Build Tauri bundles
+        continue-on-error: true
+        run: pnpm tauri:bundle
+
+      - name: Collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          cp binpick-*-linux-x86_64.tar.gz release-assets/
+          cp binpick-*-linux-x86_64.tar.gz.sha256 release-assets/
+          find src-tauri/target/release/bundle -type f \( \
+            -name "*.deb" -o \
+            -name "*.rpm" -o \
+            -name "*.AppImage" \
+          \) -exec cp {} release-assets/ \; 2>/dev/null || true
+
+          cd release-assets
+          sha256sum * > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          ls -lah
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
         with:
-          tagName: ${{ inputs.tag || github.ref_name }}
-          releaseName: "binpick ${{ inputs.tag || github.ref_name }}"
-          releaseBody: "Installable binpick build for Linux."
-          releaseDraft: false
-          prerelease: false
+          tag_name: ${{ steps.release_meta.outputs.release_tag }}
+          files: release-assets/*
+          draft: false
+          prerelease: ${{ contains(steps.release_meta.outputs.release_tag, '-') }}
+          generate_release_notes: true
+          body: |
+            Download the `binpick-*-linux-x86_64.tar.gz` asset, extract it, then run:
+
+            ```bash
+            bash scripts/release-install.sh
+            ```
+
+            Verify downloaded assets with `sha256sum -c SHA256SUMS`.

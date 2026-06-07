@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev -- --bin binpick",
     "tauri:dev:theme-selector": "tauri dev -- --bin binpick-theme-selector",
-    "tauri:build": "tauri build --no-bundle"
+    "tauri:build": "tauri build --no-bundle",
+    "tauri:bundle": "tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

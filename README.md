@@ -37,16 +37,24 @@ pnpm install
 pnpm tauri:dev
 ```
 
-## Build + install
+## Build
 
 ```sh
 pnpm tauri:build
 ```
 
-Install the built binary into `~/.local/bin`:
+## Install from a GitHub release
 
 ```sh
-pnpm install:local
+tar -xzf binpick-0.0.1-linux-x86_64.tar.gz
+cd binpick-0.0.1-linux-x86_64
+bash scripts/release-install.sh
+```
+
+Verify release downloads with:
+
+```sh
+sha256sum -c SHA256SUMS
 ```
 
 ## GitHub releases
