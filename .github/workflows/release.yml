@@ -121,8 +121,8 @@ jobs:
           \) -exec cp {} release-assets/ \; 2>/dev/null || true
 
           cd release-assets
-          sha256sum * > SHA256SUMS
-          sha256sum -c SHA256SUMS
+          sha256sum * > "binpick-${RELEASE_VERSION}_checksums.txt"
+          sha256sum -c "binpick-${RELEASE_VERSION}_checksums.txt"
           ls -lah
 
       - name: Publish GitHub release
@@ -140,4 +140,4 @@ jobs:
             bash scripts/release-install.sh
             ```
 
-            Verify downloaded assets with `sha256sum -c SHA256SUMS`.
+            Verify downloaded assets with `sha256sum -c binpick-${{ steps.release_meta.outputs.release_version }}_checksums.txt`.

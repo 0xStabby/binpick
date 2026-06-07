@@ -54,7 +54,7 @@ bash scripts/release-install.sh
 Verify release downloads with:
 
 ```sh
-sha256sum -c SHA256SUMS
+sha256sum -c binpick-0.0.1_checksums.txt
 ```
 
 ## GitHub releases
