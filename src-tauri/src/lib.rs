@@ -13,6 +13,7 @@ use base64::{engine::general_purpose, Engine as _};
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct AppConfig {
     items: Vec<ConfigItem>,
+    theme: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -38,7 +39,10 @@ fn config_dir() -> Result<PathBuf, String> {
 }
 
 fn default_config() -> AppConfig {
-    AppConfig { items: Vec::new() }
+    AppConfig {
+        items: Vec::new(),
+        theme: Some("hacker".to_string()),
+    }
 }
 
 fn ensure_config_dir() -> Result<PathBuf, String> {
@@ -71,6 +75,19 @@ fn write_config_cache(config_dir: &Path, config: &AppConfig) -> Result<(), Strin
     let cache_path = config_cache_path(config_dir);
     let data = serde_json::to_string(config).map_err(|err| format!("serialize cache: {err}"))?;
     fs::write(cache_path, data).map_err(|err| format!("write cache: {err}"))
+}
+
+fn normalize_theme(theme: Option<String>) -> Option<String> {
+    match theme {
+        Some(value) if !value.trim().is_empty() => Some(value),
+        _ => Some("hacker".to_string()),
+    }
+}
+
+fn is_theme_selector_args(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "--theme-selector" || arg.contains("binpick-theme-selector")
+    })
 }
 
 fn desktop_icon_map() -> HashMap<String, String> {
@@ -318,14 +335,18 @@ fn build_config() -> Result<AppConfig, String> {
         }
     }
 
-    Ok(AppConfig { items: merged })
+    Ok(AppConfig {
+        items: merged,
+        theme: normalize_theme(config.theme),
+    })
 }
 
 #[tauri::command]
 fn get_config() -> Result<AppConfig, String> {
     let dir = ensure_config_dir()?;
     let _ = ensure_config_file(&dir)?;
-    if let Some(config) = read_config_cache(&dir) {
+    if let Some(mut config) = read_config_cache(&dir) {
+        config.theme = normalize_theme(config.theme);
         return Ok(config);
     }
     Ok(default_config())
@@ -354,6 +375,39 @@ fn refresh_config(app: tauri::AppHandle) -> Result<(), String> {
         let _ = app.emit("config_refreshed", config);
     });
     Ok(())
+}
+
+#[tauri::command]
+fn set_theme(theme: String) -> Result<(), String> {
+    let theme = theme.trim();
+    if theme.is_empty() {
+        return Err("theme is empty".to_string());
+    }
+    let dir = ensure_config_dir()?;
+    let config_path = ensure_config_file(&dir)?;
+    let raw = fs::read_to_string(&config_path).map_err(|err| format!("read config: {err}"))?;
+    let mut config: AppConfig =
+        serde_json::from_str(&raw).map_err(|err| format!("parse config: {err}"))?;
+    config.theme = Some(theme.to_string());
+    let data =
+        serde_json::to_string_pretty(&config).map_err(|err| format!("serialize config: {err}"))?;
+    fs::write(&config_path, data).map_err(|err| format!("write config: {err}"))?;
+
+    let mut cached = read_config_cache(&dir).unwrap_or_else(default_config);
+    cached.theme = Some(theme.to_string());
+    let _ = write_config_cache(&dir, &cached);
+
+    Ok(())
+}
+
+#[tauri::command]
+fn get_startup_mode() -> Result<String, String> {
+    let args: Vec<String> = env::args().collect();
+    if is_theme_selector_args(&args) {
+        Ok("theme-selector".to_string())
+    } else {
+        Ok("launcher".to_string())
+    }
 }
 
 #[tauri::command]
@@ -402,6 +456,11 @@ pub fn run() {
             let Some(window) = app.get_webview_window("main") else {
                 return;
             };
+            if is_theme_selector_args(&_args) {
+                let _ = window.emit("open_theme_selector", ());
+            } else {
+                let _ = window.emit("open_launcher", ());
+            }
             let _ = window.unminimize();
             let _ = window.show();
             let _ = window.set_focus();
@@ -410,54 +469,19 @@ pub fn run() {
     }
 
     builder
-        .setup(|app| {
-            #[cfg(desktop)]
-            {
-                use tauri_plugin_global_shortcut::{
-                    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
-                };
-
-                let shortcut = if cfg!(target_os = "macos") {
-                    Shortcut::new(Some(Modifiers::META), Code::Space)
-                } else {
-                    Shortcut::new(Some(Modifiers::CONTROL), Code::Space)
-                };
-
-                app.handle().plugin(
-                    tauri_plugin_global_shortcut::Builder::new()
-                        .with_handler(move |app, _, event| {
-                            if event.state() != ShortcutState::Pressed {
-                                return;
-                            }
-                            let Some(window) = app.get_webview_window("main") else {
-                                return;
-                            };
-                            let is_visible = window.is_visible().unwrap_or(false);
-                            if is_visible {
-                                let _ = window.hide();
-                                return;
-                            }
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                            let _ = window.emit("focus_input", ());
-                        })
-                        .build(),
-                )?;
-
-                let _ = app.global_shortcut().register(shortcut);
-            }
-            Ok(())
-        })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                let _ = window.emit("window_hidden", ());
             }
         })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_config,
             refresh_config,
+            set_theme,
+            get_startup_mode,
             get_icon_data,
             get_config_dir,
             run_command,

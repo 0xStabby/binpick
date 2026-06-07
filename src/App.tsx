@@ -6,9 +6,11 @@ import {
   useState,
   type KeyboardEventHandler,
 } from "react";
+import { flushSync } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { LogicalSize, getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
+import { ThemeSelect, defaultPalettes } from "react-theme-select";
 import "./App.css";
 
 type ConfigItem = {
@@ -19,7 +21,10 @@ type ConfigItem = {
 
 type AppConfig = {
   items: ConfigItem[];
+  theme?: string | null;
 };
+
+type ViewMode = "launcher" | "theme-selector";
 
 function App() {
   const [items, setItems] = useState<ConfigItem[]>([]);
@@ -28,10 +33,34 @@ function App() {
   const [configDir, setConfigDir] = useState("");
   const [status, setStatus] = useState("");
   const [iconCache, setIconCache] = useState<Record<string, string>>({});
+  const [theme, setTheme] = useState("hacker");
+  const [view, setView] = useState<ViewMode>("launcher");
   const launcherRef = useRef<HTMLElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const resizeRef = useRef<() => void>(() => undefined);
   const windowHandle = useMemo(() => getCurrentWindow(), []);
+
+  const resetState = () => {
+    setQuery("");
+    setActiveIndex(0);
+    setStatus("");
+    setView("launcher");
+  };
+
+  const isThemeSelectorCommand = (command: string) => {
+    const normalized = command.trim();
+    return (
+      normalized.includes("binpick-theme-selector") ||
+      normalized.includes("--theme-selector")
+    );
+  };
+
+  const hideAndReset = () => {
+    flushSync(() => {
+      resetState();
+    });
+    windowHandle.hide().catch(() => undefined);
+  };
 
   const filtered = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -86,6 +115,9 @@ function App() {
   useEffect(() => {
     let unlistenConfig: (() => void) | undefined;
     let unlistenFocus: (() => void) | undefined;
+    let unlistenTheme: (() => void) | undefined;
+    let unlistenLauncher: (() => void) | undefined;
+    let unlistenHidden: (() => void) | undefined;
 
     const focusInput = () => {
       const input = inputRef.current;
@@ -96,6 +128,9 @@ function App() {
 
     listen<AppConfig>("config_refreshed", (event) => {
       setItems(event.payload.items ?? []);
+      if (event.payload.theme) {
+        setTheme(event.payload.theme);
+      }
     })
       .then((stop) => {
         unlistenConfig = stop;
@@ -110,11 +145,48 @@ function App() {
       })
       .catch((err) => setStatus(String(err)));
 
+    listen("open_theme_selector", () => {
+      setView("theme-selector");
+      invoke("refresh_config").catch((err) => setStatus(String(err)));
+    })
+      .then((stop) => {
+        unlistenTheme = stop;
+      })
+      .catch((err) => setStatus(String(err)));
+
+    listen("open_launcher", () => {
+      setView("launcher");
+      invoke("refresh_config").catch((err) => setStatus(String(err)));
+    })
+      .then((stop) => {
+        unlistenLauncher = stop;
+      })
+      .catch((err) => setStatus(String(err)));
+
+    listen("window_hidden", () => {
+      resetState();
+    })
+      .then((stop) => {
+        unlistenHidden = stop;
+      })
+      .catch((err) => setStatus(String(err)));
+
     invoke("refresh_config").catch((err) => setStatus(String(err)));
 
     invoke<AppConfig>("get_config")
       .then((config) => {
         setItems(config.items ?? []);
+        if (config.theme) {
+          setTheme(config.theme);
+        }
+      })
+      .catch((err) => setStatus(String(err)));
+
+    invoke<string>("get_startup_mode")
+      .then((mode) => {
+        if (mode === "theme-selector") {
+          setView("theme-selector");
+        }
       })
       .catch((err) => setStatus(String(err)));
 
@@ -129,8 +201,63 @@ function App() {
       if (unlistenFocus) {
         unlistenFocus();
       }
+      if (unlistenTheme) {
+        unlistenTheme();
+      }
+      if (unlistenLauncher) {
+        unlistenLauncher();
+      }
+      if (unlistenHidden) {
+        unlistenHidden();
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (view !== "launcher") return;
+    requestAnimationFrame(() => {
+      const input = inputRef.current;
+      if (!input) return;
+      input.focus();
+      input.select();
+    });
+  }, [view]);
+
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      resizeRef.current();
+    });
+  }, [view]);
+
+  useEffect(() => {
+    const palette = defaultPalettes[theme] ?? defaultPalettes.hacker;
+    const root = document.documentElement;
+    root.dataset.theme = theme;
+    root.style.setProperty("--background", palette.background);
+    root.style.setProperty("--surface", palette.surface);
+    root.style.setProperty("--text", palette.text);
+    root.style.setProperty("--border", palette.border);
+    root.style.setProperty("--primary", palette.primary);
+    root.style.setProperty("--success", palette.success);
+    root.style.setProperty("--warning", palette.warning);
+    root.style.setProperty("--danger", palette.danger);
+    root.style.setProperty("--info", palette.info);
+    root.style.setProperty("--muted", palette.muted ?? palette.text);
+  }, [theme]);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        hideAndReset();
+      }
+      if (event.key.toLowerCase() === "q" && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        invoke("quit").catch(() => undefined);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [windowHandle]);
 
   useLayoutEffect(() => {
     const launcher = launcherRef.current;
@@ -177,7 +304,9 @@ function App() {
     setStatus("");
     try {
       await invoke("run_command", { command: item.command });
-      await windowHandle.hide();
+      if (!isThemeSelectorCommand(item.command)) {
+        hideAndReset();
+      }
     } catch (err) {
       setStatus(String(err));
     }
@@ -204,17 +333,31 @@ function App() {
     }
     if (event.key === "Escape") {
       event.preventDefault();
-      windowHandle.hide().catch(() => undefined);
+      hideAndReset();
     }
-    if (event.key.toLowerCase() === "q" && (event.metaKey || event.ctrlKey)) {
-      event.preventDefault();
-      invoke("quit").catch(() => undefined);
-    }
+  };
+
+  const handleThemeChange = (nextTheme: string) => {
+    setTheme(nextTheme);
+    invoke("set_theme", { theme: nextTheme }).catch((err) => setStatus(String(err)));
   };
 
   return (
     <main className="app">
-      <section className="launcher" ref={launcherRef}>
+      <section
+        className={`launcher${view === "theme-selector" ? " launcher--themes" : ""}`}
+        ref={launcherRef}
+      >
+        {view === "theme-selector" ? (
+          <div className="theme-selector">
+            <ThemeSelect
+              theme={theme}
+              setTheme={handleThemeChange}
+              availableThemes={Object.keys(defaultPalettes)}
+            />
+          </div>
+        ) : (
+          <>
         <div className="search">
           <label className="sr-only" htmlFor="launcher-input">
             Search commands
@@ -261,6 +404,8 @@ function App() {
 
         <span className="sr-only">{status || "Ready."}</span>
         <span className="sr-only">{configDir || "Config: loading..."}</span>
+          </>
+        )}
       </section>
     </main>
   );

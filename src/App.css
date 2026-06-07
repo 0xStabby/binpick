@@ -83,6 +83,15 @@ body {
   animation: rise 400ms ease-out;
 }
 
+.launcher--themes {
+  max-width: 980px;
+}
+
+.theme-selector {
+  display: grid;
+  gap: 16px;
+}
+
 .search {
   display: grid;
   gap: 8px;

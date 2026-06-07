@@ -20,6 +20,9 @@ importers:
       react-dom:
         specifier: ^19.1.0
         version: 19.2.3(react@19.2.3)
+      react-theme-select:
+        specifier: ^0.0.0
+        version: 0.0.0(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
     devDependencies:
       '@tauri-apps/cli':
         specifier: ^2
@@ -620,6 +623,12 @@ packages:
     resolution: {integrity: sha512-z6F7K9bV85EfseRCp2bzrpyQ0Gkw1uLoCel9XBVWPg/TjRj94SkJzUTGfOa4bs7iJvBWtQG0Wq7wnI0syw3EBQ==}
     engines: {node: '>=0.10.0'}
 
+  react-theme-select@0.0.0:
+    resolution: {integrity: sha512-xjQODA2msJTZFvFyU8cEfHHhO8NEjlLNeHOJ1D8z/0dCl674IqRz+b/p5P6kSQoCkn88mJAiFNp27uDZG2r6TQ==}
+    peerDependencies:
+      react: '>=17'
+      react-dom: '>=17'
+
   react@19.2.3:
     resolution: {integrity: sha512-Ku/hhYbVjOQnXDZFv2+RibmLFGwFdeeKHFcOTlrt7xplBnya5OGn/hIRDsqDiSUcfORsDC7MPxwork8jBwsIWA==}
     engines: {node: '>=0.10.0'}
@@ -1167,6 +1176,11 @@ snapshots:
       scheduler: 0.27.0
 
   react-refresh@0.17.0: {}
+
+  react-theme-select@0.0.0(react-dom@19.2.3(react@19.2.3))(react@19.2.3):
+    dependencies:
+      react: 19.2.3
+      react-dom: 19.2.3(react@19.2.3)
 
   react@19.2.3: {}
 
