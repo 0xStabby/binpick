@@ -48,3 +48,16 @@ Install the built binary into `~/.local/bin`:
 ```sh
 pnpm install:local
 ```
+
+## GitHub releases
+
+Installable builds are published by the `Release` GitHub Actions workflow.
+To create a release, push a version tag:
+
+```sh
+git tag v0.0.1
+git push origin v0.0.1
+```
+
+You can also run the workflow manually from GitHub Actions and provide the
+release tag.
